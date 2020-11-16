@@ -1,0 +1,29 @@
+#+TITLE: rdbs
+
+=rdbs= (RekorDBox to Spotify) is a tool for putting Rekordbox
+playlists into Spotify.
+
+* Installation
+
+  #+begin_src shell
+    go install github.com/r-medina/rdbs
+  #+end_src
+
+* How to use
+
+  1. export a Rekordbox playlist to a =.txt= file
+
+     - right click the playlist and click "Export a playlist to a
+       file" → "Export a playlist to a file for KUVO (*.txt)"
+
+  2. use this program
+
+     #+begin_src shell
+       rdbs <your-playlist-name> <location-of-exported-plylist-txt-file>
+     #+end_src
+
+     running this will open a browser which will grant this app
+     permissions to make playlists and search for songs on your behalf
+
+     after you've authorized it, it will make a playlist with the
+     tracks in the file and log the names of any tracks it didn't find

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/csv"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,16 +15,29 @@ import (
 	"github.com/zmb3/spotify"
 )
 
+var dry bool
+
 func help() {
-	fmt.Println(`rdbs <playlist-name> <playlist-file>`)
+	fmt.Println(`rdbs [-d] <playlist-name> <playlist-file>
+	-d	dry run (only search song names - don't make playlist)`)
+}
+
+func init() {
+	flag.BoolVar(&dry, "d", false, "dry run")
 }
 
 func main() {
-	if len(os.Args) < 3 {
+	flag.Parse()
+
+	if flag.NArg() < 2 {
 		help()
 		os.Exit(1)
 	}
 
+	if dry {
+		log.Println("executing dry run")
+	}
+	
 	spotifyClientID := os.Getenv("SPOTIFY_ID")
 	spotifySecret := os.Getenv("SPOTIFY_SECRET")
 
@@ -31,18 +45,8 @@ func main() {
 		log.Fatalf("please set environment variables SPOTIFY_ID and SPOTIFY_SECRET")
 	}
 
-	playlistName := os.Args[1]
-	playlistFile := os.Args[2]
-
-	// config := &clientcredentials.Config{
-	// 	ClientID:     spotifyClientID,
-	// 	ClientSecret: spotifySecret,
-	// 	TokenURL:     spotify.TokenURL,
-	// }
-	// token, err := config.Token(context.Background())
-	// if err != nil {
-	// 	log.Fatalf("couldn't get token: %v", err)
-	// }
+	playlistName := flag.Args()[0]
+	playlistFile := flag.Args()[1]
 
 	client, err := oauthClient(spotifyClientID, spotifySecret)
 
@@ -50,11 +54,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("could not get current user: %v", err)
 	}
-	fmt.Printf("user: %s\n", user.DisplayName)
+	log.Printf("user: %s", user.DisplayName)
 
-	playlist, err := client.CreatePlaylistForUser(user.ID, playlistName, "exported from rekordbox", false)
-	if err != nil {
-		log.Fatalf("could not create playlist %q: %v", playlistName, err)
+	var playlist *spotify.FullPlaylist
+	if !dry {
+		playlist, err = client.CreatePlaylistForUser(user.ID, playlistName, "exported from rekordbox", false)
+		if err != nil {
+			log.Fatalf("could not create playlist %q: %v", playlistName, err)
+		}
 	}
 
 	tracks, err := listTracks(playlistFile)
@@ -64,9 +71,26 @@ func main() {
 
 	ids := []spotify.ID{}
 	for _, t := range tracks {
-		fmt.Printf("\t%s - %s\n", t.Artist, t.Title)
+		artist := t.Artist
+		title := t.Title
 
-		q := fmt.Sprintf("%s %s\n", t.Artist, t.Title)
+		
+		fmt.Printf("\t%s - %s\n", artist, title)
+
+		// spotify doesnt like the (Original Mix) or (Someone
+		// Remix) that dance music uses
+
+		title = strings.ReplaceAll(title, "(Original Mix)", "")
+		title = strings.ReplaceAll(title, "(", "")
+		title = strings.ReplaceAll(title, ")", "")
+
+		end := len(artist)
+		if i := strings.Index(artist, "("); i >0 {
+			end = i
+		}
+		artist = artist[0:end]
+		
+		q := fmt.Sprintf("%s %s\n", artist, title)
 		results, err := client.Search(q, spotify.SearchTypeTrack)
 		if err != nil {
 			log.Fatalf("spotify search failed: %v", err)
@@ -74,20 +98,24 @@ func main() {
 
 		if results.Tracks != nil {
 			if len(results.Tracks.Tracks) == 0 {
+				log.Printf("could not find '%s - %s'", artist, title)
 				continue
 			}
-			ids = append(ids, results.Tracks.Tracks[0].ID)
+			track := results.Tracks.Tracks[0]
+
+			if dry {
+				fmt.Printf("\t\t%s - %s %q\n", track.Name, track.Artists[0].Name, track.ID)
+			}
+			ids = append(ids, track.ID)
 		}
 	}
 
-	// for _, id := range ids {
-	// 	fmt.Printf("https://open.spotify.com/track/%s\n", id)
-	// }
-
-	log.Println("adding songs to playlist")
-	_, err = client.AddTracksToPlaylist(playlist.ID, ids...)
-	if err != nil {
-		log.Fatalf("could not add tracks to playlist %q: %v", playlistName, err)
+	if !dry {
+		log.Println("adding songs to playlist")
+		_, err = client.AddTracksToPlaylist(playlist.ID, ids...)
+		if err != nil {
+			log.Fatalf("could not add tracks to playlist %q: %v", playlistName, err)
+		}
 	}
 }
 
@@ -147,7 +175,7 @@ func listTracks(fname string) ([]track, error) {
 
 	var tracks []track
 	for i, d := range data {
-		if len(d) < 2 || i == 0 {
+		if len(d) < 4 || i == 0 {
 			continue
 		}
 
@@ -158,10 +186,8 @@ func listTracks(fname string) ([]track, error) {
 		artist = string(bytes.ReplaceAll([]byte(artist), []byte{00}, nil))
 		title = string(bytes.ReplaceAll([]byte(title), []byte{00}, nil))
 
+		artist = strings.TrimSpace(artist)
 		title = strings.TrimSpace(title)
-		title = strings.ReplaceAll(title, "(Original Mix)", "")
-		title = strings.ReplaceAll(title, "(", "")
-		title = strings.ReplaceAll(title, ")", "")
 
 		tracks = append(tracks, track{Artist: artist, Title: title})
 	}
