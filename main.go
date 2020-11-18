@@ -26,7 +26,6 @@ func help() {
 
 func init() {
 	flag.BoolVar(&dry, "d", false, "dry run")
-	log.SetFlags(log.Lshortfile)
 }
 
 func main() {
@@ -38,6 +37,7 @@ func main() {
 	}
 
 	if dry {
+		log.SetFlags(log.Lshortfile)
 		log.Println("executing dry run")
 	}
 
@@ -168,6 +168,10 @@ type track struct {
 	Title  string
 }
 
+// the files that rekordbox exports have an interesting encoding that
+// I can't find a clean way to normalize. This function iterates
+// through all the fields in every row and removes non printable
+// characters.
 func preprocess(playlistFile string) error {
 	original, err := os.Open(playlistFile)
 	if err != nil {
@@ -200,7 +204,7 @@ func preprocess(playlistFile string) error {
 		out = append(out, newRow)
 	}
 
-	processed, err := os.Create(playlistFile + ".new")
+	processed, err := os.Create(playlistFile + ".norm.txt")
 	if err != nil {
 		return err
 	}
@@ -223,23 +227,6 @@ func readData(fname string) ([][]string, error) {
 	reader.FieldsPerRecord = -1
 
 	return reader.ReadAll()
-}
-
-func writeData(fname string, data [][]string) error {
-	f, err := os.OpenFile(fname+"2", os.O_RDWR, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	f.Truncate(0)
-
-	w := csv.NewWriter(f)
-	w.Comma = '\t'
-
-	// r := csv.NewReader()
-
-	return w.WriteAll(data)
 }
 
 func listTracks(fname string) ([]track, error) {
