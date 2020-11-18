@@ -5,10 +5,12 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/pkg/errors"
 	"github.com/skratchdot/open-golang/open"
@@ -24,6 +26,7 @@ func help() {
 
 func init() {
 	flag.BoolVar(&dry, "d", false, "dry run")
+	log.SetFlags(log.Lshortfile)
 }
 
 func main() {
@@ -37,34 +40,42 @@ func main() {
 	if dry {
 		log.Println("executing dry run")
 	}
-	
-	spotifyClientID := os.Getenv("SPOTIFY_ID")
-	spotifySecret := os.Getenv("SPOTIFY_SECRET")
-
-	if spotifyClientID == "" || spotifySecret == "" {
-		log.Fatalf("please set environment variables SPOTIFY_ID and SPOTIFY_SECRET")
-	}
 
 	playlistName := flag.Args()[0]
 	playlistFile := flag.Args()[1]
 
-	client, err := oauthClient(spotifyClientID, spotifySecret)
+	log.Printf("loading %q into spotify as %q", playlistFile, playlistName)
 
-	user, err := client.CurrentUser()
-	if err != nil {
-		log.Fatalf("could not get current user: %v", err)
-	}
-	log.Printf("user: %s", user.DisplayName)
-
+	var client *spotify.Client
 	var playlist *spotify.FullPlaylist
 	if !dry {
+		spotifyClientID := os.Getenv("SPOTIFY_ID")
+		spotifySecret := os.Getenv("SPOTIFY_SECRET")
+
+		if spotifyClientID == "" || spotifySecret == "" {
+			log.Fatalf("please set environment variables SPOTIFY_ID and SPOTIFY_SECRET")
+		}
+
+		var err error
+		client, err = oauthClient(spotifyClientID, spotifySecret)
+
+		user, err := client.CurrentUser()
+		if err != nil {
+			log.Fatalf("could not get current user: %v", err)
+		}
+		log.Printf("user: %s", user.DisplayName)
+
 		playlist, err = client.CreatePlaylistForUser(user.ID, playlistName, "exported from rekordbox", false)
 		if err != nil {
 			log.Fatalf("could not create playlist %q: %v", playlistName, err)
 		}
 	}
 
-	tracks, err := listTracks(playlistFile)
+	if err := preprocess(playlistFile); err != nil {
+		log.Fatalf("processing %q: %v", playlistFile, err)
+	}
+
+	tracks, err := listTracks(playlistFile + ".new")
 	if err != nil {
 		log.Fatalf("failed to list tracks in playlist file %q: %v", playlistFile, err)
 	}
@@ -74,7 +85,6 @@ func main() {
 		artist := t.Artist
 		title := t.Title
 
-		
 		fmt.Printf("\t%s - %s\n", artist, title)
 
 		// spotify doesnt like the (Original Mix) or (Someone
@@ -85,11 +95,11 @@ func main() {
 		title = strings.ReplaceAll(title, ")", "")
 
 		end := len(artist)
-		if i := strings.Index(artist, "("); i >0 {
+		if i := strings.Index(artist, "("); i > 0 {
 			end = i
 		}
 		artist = artist[0:end]
-		
+
 		q := fmt.Sprintf("%s %s\n", artist, title)
 		results, err := client.Search(q, spotify.SearchTypeTrack)
 		if err != nil {
@@ -158,33 +168,128 @@ type track struct {
 	Title  string
 }
 
+func preprocess(playlistFile string) error {
+	original, err := os.Open(playlistFile)
+	if err != nil {
+		return err
+	}
+	defer original.Close()
+
+	r := csv.NewReader(original)
+	r.Comma = '\t'
+	r.FieldsPerRecord = -1
+
+	out := [][]string{}
+	data, err := r.ReadAll()
+	for _, row := range data {
+		if len(row) <= 1 { // some bad rows
+			continue
+		}
+		newRow := []string{}
+		for _, field := range row {
+			field = strings.Map(func(r rune) rune {
+				if unicode.IsPrint(r) || unicode.IsGraphic(r) {
+					return r
+				}
+				return -1
+			}, field)
+
+			newRow = append(newRow, field)
+		}
+
+		out = append(out, newRow)
+	}
+
+	processed, err := os.Create(playlistFile + ".new")
+	if err != nil {
+		return err
+	}
+	defer processed.Close()
+
+	w := csv.NewWriter(processed)
+	w.Comma = '\t'
+	return w.WriteAll(out)
+}
+
+func readData(fname string) ([][]string, error) {
+	f, err := os.Open(fname)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
+	reader.Comma = '\t'
+	reader.FieldsPerRecord = -1
+
+	return reader.ReadAll()
+}
+
+func writeData(fname string, data [][]string) error {
+	f, err := os.OpenFile(fname+"2", os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	f.Truncate(0)
+
+	w := csv.NewWriter(f)
+	w.Comma = '\t'
+
+	// r := csv.NewReader()
+
+	return w.WriteAll(data)
+}
+
 func listTracks(fname string) ([]track, error) {
 	f, err := os.Open(fname)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	reader := csv.NewReader(f)
+
+	buf, err := ioutil.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	buf = bytes.ReplaceAll(buf, []byte{00}, nil)
+	r := bytes.NewReader(buf)
+
+	reader := csv.NewReader(r)
 	reader.Comma = '\t'
 	reader.FieldsPerRecord = -1
 
 	data, err := reader.ReadAll()
+
+	// data, err := readData(fname)
 	if err != nil {
 		return nil, err
 	}
 
 	var tracks []track
+	var ia int
+	var it int
 	for i, d := range data {
-		if len(d) < 4 || i == 0 {
+		if i == 0 {
+			for j, field := range d {
+				if field == "Artist" {
+					ia = j
+				} else if field == "Track Title" {
+					it = j
+				}
+			}
+
 			continue
 		}
 
-		artist := d[4]
-		title := d[2]
+		if len(d) < 4 {
+			continue
+		}
 
-		// rekordbox includes a bunch of \x00 in the text :/
-		artist = string(bytes.ReplaceAll([]byte(artist), []byte{00}, nil))
-		title = string(bytes.ReplaceAll([]byte(title), []byte{00}, nil))
+		artist := d[ia]
+		title := d[it]
 
 		artist = strings.TrimSpace(artist)
 		title = strings.TrimSpace(title)
