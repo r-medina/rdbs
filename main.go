@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/pkg/errors"
@@ -58,6 +59,9 @@ func main() {
 
 		var err error
 		client, err = oauthClient(spotifyClientID, spotifySecret)
+		if err != nil {
+			log.Fatalf("oauth client failed: %v", err)
+		}
 
 		user, err := client.CurrentUser()
 		if err != nil {
@@ -159,8 +163,12 @@ func oauthClient(clientID, secretKey string) (*spotify.Client, error) {
 		return nil, err
 	}
 
-	err := <-httpDone
-	return client, err
+	select {
+	case err := <-httpDone:
+		return client, err
+	case <-time.After(5 * time.Second):
+		return nil, errors.New("timeout waiting for oauth token")
+	}
 }
 
 type track struct {
