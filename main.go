@@ -75,7 +75,7 @@ func main() {
 		log.Fatalf("processing %q: %v", playlistFile, err)
 	}
 
-	tracks, err := listTracks(playlistFile + ".new")
+	tracks, err := listTracks(playlistFile + ".norm.txt")
 	if err != nil {
 		log.Fatalf("failed to list tracks in playlist file %q: %v", playlistFile, err)
 	}
@@ -241,7 +241,6 @@ func listTracks(fname string) ([]track, error) {
 		return nil, err
 	}
 
-	buf = bytes.ReplaceAll(buf, []byte{00}, nil)
 	r := bytes.NewReader(buf)
 
 	reader := csv.NewReader(r)
@@ -250,7 +249,6 @@ func listTracks(fname string) ([]track, error) {
 
 	data, err := reader.ReadAll()
 
-	// data, err := readData(fname)
 	if err != nil {
 		return nil, err
 	}
