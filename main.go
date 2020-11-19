@@ -126,6 +126,20 @@ func main() {
 
 	if !dry {
 		log.Println("adding songs to playlist")
+
+		// we have to break the request into chunks of 100
+		// songs to do this, we loop over chunks of `ids` of
+		// length 100 and then finish off the remaining ones
+		// at the end
+
+		for len(ids) > 100 {
+			_, err = client.AddTracksToPlaylist(playlist.ID, ids[0:100]...)
+			if err != nil {
+				log.Fatalf("could not add tracks to playlist %q: %v", playlistName, err)
+			}
+			ids = ids[100:]
+		}
+
 		_, err = client.AddTracksToPlaylist(playlist.ID, ids...)
 		if err != nil {
 			log.Fatalf("could not add tracks to playlist %q: %v", playlistName, err)
