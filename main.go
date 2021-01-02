@@ -155,10 +155,15 @@ func oauthClient(clientID, secretKey string) (*spotify.Client, error) {
 	httpDone := make(chan error)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			log.Println(r.Method, r.URL.Path)
+			return
+		}
 		defer close(httpDone)
 
 		token, err := auth.Token("", r)
 		if err != nil {
+			log.Println("error getting token:", err)
 			http.Error(w, "failed to get token", http.StatusNotFound)
 			httpDone <- errors.Wrap(err, "failed to get token")
 			return
