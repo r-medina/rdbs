@@ -49,26 +49,26 @@ func main() {
 
 	var client *spotify.Client
 	var playlist *spotify.FullPlaylist
+	spotifyClientID := os.Getenv("SPOTIFY_ID")
+	spotifySecret := os.Getenv("SPOTIFY_SECRET")
+
+	if spotifyClientID == "" || spotifySecret == "" {
+		log.Fatalf("please set environment variables SPOTIFY_ID and SPOTIFY_SECRET")
+	}
+
+	var err error
+	client, err = oauthClient(spotifyClientID, spotifySecret)
+	if err != nil {
+		log.Fatalf("oauth client failed: %v", err)
+	}
+
+	user, err := client.CurrentUser()
+	if err != nil {
+		log.Fatalf("could not get current user: %v", err)
+	}
+	log.Printf("user: %s", user.DisplayName)
+
 	if !dry {
-		spotifyClientID := os.Getenv("SPOTIFY_ID")
-		spotifySecret := os.Getenv("SPOTIFY_SECRET")
-
-		if spotifyClientID == "" || spotifySecret == "" {
-			log.Fatalf("please set environment variables SPOTIFY_ID and SPOTIFY_SECRET")
-		}
-
-		var err error
-		client, err = oauthClient(spotifyClientID, spotifySecret)
-		if err != nil {
-			log.Fatalf("oauth client failed: %v", err)
-		}
-
-		user, err := client.CurrentUser()
-		if err != nil {
-			log.Fatalf("could not get current user: %v", err)
-		}
-		log.Printf("user: %s", user.DisplayName)
-
 		playlist, err = client.CreatePlaylistForUser(user.ID, playlistName, "exported from rekordbox", false)
 		if err != nil {
 			log.Fatalf("could not create playlist %q: %v", playlistName, err)
