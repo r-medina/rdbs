@@ -185,7 +185,7 @@ func oauthClient(clientID, secretKey string) (*spotify.Client, error) {
 	select {
 	case err := <-httpDone:
 		return client, err
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		return nil, errors.New("timeout waiting for oauth token")
 	}
 }
