@@ -11,12 +11,20 @@ playlists into Spotify.
 
 * How to use
 
-  1. export a Rekordbox playlist to a =.txt= file
+  1. get your spotify api keys
+
+     https://developer.spotify.com/documentation/general/guides/authorization/app-settings/
+
+     you need a Spotify ID and a Spotify Secret
+
+     put them into the environment as =SPOTIFY_ID= and =SPOTIFY_SECRET=
+
+  3. export a Rekordbox playlist to a =.txt= file
 
      - right click the playlist and click "Export a playlist to a
        file" → "Export a playlist to a file for KUVO (*.txt)"
 
-  2. use this program
+  4. use this program
 
      #+begin_src shell
        rdbs <your-playlist-name> <location-of-exported-plylist-txt-file>
