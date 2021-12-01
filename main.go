@@ -1,17 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"encoding/csv"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-	"unicode"
+
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 
 	"github.com/pkg/errors"
 	"github.com/skratchdot/open-golang/open"
@@ -71,17 +71,18 @@ func main() {
 	if !dry {
 		playlist, err = client.CreatePlaylistForUser(user.ID, playlistName, "exported from rekordbox", false)
 		if err != nil {
-			log.Fatalf("could not create playlist %q: %v", playlistName, err)
+			log.Fatalf("could not create playlist %q: %+v", playlistName, err)
 		}
 	}
 
-	if err := preprocess(playlistFile); err != nil {
-		log.Fatalf("processing %q: %v", playlistFile, err)
+	data, err := readData(playlistFile)
+	if err != nil {
+		log.Fatalf("could not read the playlist file: %+v", err)
 	}
 
-	tracks, err := listTracks(playlistFile + ".norm.txt")
+	tracks, err := listTracks(data)
 	if err != nil {
-		log.Fatalf("failed to list tracks in playlist file %q: %v", playlistFile, err)
+		log.Fatalf("could not list tracks: %+v", err)
 	}
 
 	ids := []spotify.ID{}
@@ -93,10 +94,13 @@ func main() {
 
 		// spotify doesnt like the (Original Mix) or (Someone
 		// Remix) that dance music uses
+		// also doesnt like "feat"
 
-		title = strings.ReplaceAll(title, "(Original Mix)", "")
+		title = strings.ToLower(title)
+		title = strings.ReplaceAll(title, "original mix", "")
 		title = strings.ReplaceAll(title, "(", "")
 		title = strings.ReplaceAll(title, ")", "")
+		title = strings.ReplaceAll(title, "feat.", "")
 
 		end := len(artist)
 		if i := strings.Index(artist, "("); i > 0 {
@@ -107,7 +111,7 @@ func main() {
 		q := fmt.Sprintf("%s %s\n", artist, title)
 		results, err := client.Search(q, spotify.SearchTypeTrack)
 		if err != nil {
-			log.Fatalf("spotify search failed: %v", err)
+			log.Fatalf("spotify search failed: %+v", err)
 		}
 
 		if results.Tracks != nil {
@@ -195,91 +199,28 @@ type track struct {
 	Title  string
 }
 
-// the files that rekordbox exports have an interesting encoding that
-// I can't find a clean way to normalize. This function iterates
-// through all the fields in every row and removes non printable
-// characters.
-func preprocess(playlistFile string) error {
-	original, err := os.Open(playlistFile)
+func readData(fname string) ([][]string, error) {
+	original, err := os.Open(fname)
 	if err != nil {
-		return err
+		return nil, errors.WithStack(err)
 	}
 	defer original.Close()
 
-	r := csv.NewReader(original)
-	r.Comma = '\t'
-	r.FieldsPerRecord = -1
+	dec := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder()
+	utf8r := transform.NewReader(original, dec)
+	csvr := csv.NewReader(utf8r)
 
-	out := [][]string{}
-	data, err := r.ReadAll()
-	for _, row := range data {
-		if len(row) <= 1 { // some bad rows
-			continue
-		}
-		newRow := []string{}
-		for _, field := range row {
-			field = strings.Map(func(r rune) rune {
-				if unicode.IsPrint(r) || unicode.IsGraphic(r) {
-					return r
-				}
-				return -1
-			}, field)
-
-			newRow = append(newRow, field)
-		}
-
-		out = append(out, newRow)
-	}
-
-	processed, err := os.Create(playlistFile + ".norm.txt")
+	csvr.Comma = '\t'
+	csvr.FieldsPerRecord = -1
+	records, err := csvr.ReadAll()
 	if err != nil {
-		return err
+		return nil, errors.WithStack(err)
 	}
-	defer processed.Close()
 
-	w := csv.NewWriter(processed)
-	w.Comma = '\t'
-	return w.WriteAll(out)
+	return records, nil
 }
 
-func readData(fname string) ([][]string, error) {
-	f, err := os.Open(fname)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	reader := csv.NewReader(f)
-	reader.Comma = '\t'
-	reader.FieldsPerRecord = -1
-
-	return reader.ReadAll()
-}
-
-func listTracks(fname string) ([]track, error) {
-	f, err := os.Open(fname)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	buf, err := ioutil.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-
-	r := bytes.NewReader(buf)
-
-	reader := csv.NewReader(r)
-	reader.Comma = '\t'
-	reader.FieldsPerRecord = -1
-
-	data, err := reader.ReadAll()
-
-	if err != nil {
-		return nil, err
-	}
-
+func listTracks(data [][]string) ([]track, error) {
 	var tracks []track
 	var ia int
 	var it int
