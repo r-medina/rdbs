@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -8,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
+	"golang.org/x/term"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 
@@ -53,7 +56,21 @@ func main() {
 	spotifySecret := os.Getenv("SPOTIFY_SECRET")
 
 	if spotifyClientID == "" || spotifySecret == "" {
-		log.Fatalf("please set environment variables SPOTIFY_ID and SPOTIFY_SECRET")
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("input your Spotify client ID: ")
+		var err error
+		spotifyClientID, err = reader.ReadString('\n')
+		if err != nil {
+			log.Fatalf("error reading Spotify client ID: %v", err)
+		}
+		spotifyClientID = strings.TrimSuffix(spotifyClientID, "\n")
+
+		fmt.Print("input your Spotify secret key: ")
+		secretBytes, err := term.ReadPassword(int(syscall.Stdin))
+		if err != nil {
+			log.Fatalf("error reading Spotify secret key: %v", err)
+		}
+		spotifySecret = string(secretBytes)
 	}
 
 	var err error
@@ -111,7 +128,8 @@ func main() {
 		q := fmt.Sprintf("%s %s\n", artist, title)
 		results, err := client.Search(q, spotify.SearchTypeTrack)
 		if err != nil {
-			log.Fatalf("spotify search failed: %+v", err)
+			log.Printf("spotify search failed: %+v", err)
+			continue
 		}
 
 		if results.Tracks != nil {
