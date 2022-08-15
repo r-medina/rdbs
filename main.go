@@ -55,52 +55,40 @@ func main() {
 	spotifyClientID := os.Getenv("SPOTIFY_ID")
 	spotifySecret := os.Getenv("SPOTIFY_SECRET")
 
-	if spotifyClientID == "" || spotifySecret == "" {
+	if spotifyClientID == "" {
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Print("input your Spotify client ID: ")
 		var err error
 		spotifyClientID, err = reader.ReadString('\n')
-		if err != nil {
-			log.Fatalf("error reading Spotify client ID: %v", err)
-		}
+		failIfError("error reading Spotify client ID", err)
 		spotifyClientID = strings.TrimSuffix(spotifyClientID, "\n")
+	}
 
+	if spotifySecret == "" {
 		fmt.Print("input your Spotify secret key: ")
 		secretBytes, err := term.ReadPassword(int(syscall.Stdin))
-		if err != nil {
-			log.Fatalf("error reading Spotify secret key: %v", err)
-		}
+		failIfError("error reading Spotify secret key", err)
 		spotifySecret = string(secretBytes)
 	}
 
 	var err error
 	client, err = oauthClient(spotifyClientID, spotifySecret)
-	if err != nil {
-		log.Fatalf("oauth client failed: %v", err)
-	}
+	failIfError("oauth client failed", err)
 
 	user, err := client.CurrentUser()
-	if err != nil {
-		log.Fatalf("could not get current user: %v", err)
-	}
+	failIfError("could not get current user", err)
 	log.Printf("user: %s", user.DisplayName)
 
 	if !dry {
 		playlist, err = client.CreatePlaylistForUser(user.ID, playlistName, "exported from rekordbox", false)
-		if err != nil {
-			log.Fatalf("could not create playlist %q: %+v", playlistName, err)
-		}
+		failIfError("could not create playlist", err)
 	}
 
 	data, err := readData(playlistFile)
-	if err != nil {
-		log.Fatalf("could not read the playlist file: %+v", err)
-	}
+	failIfError("could not read the playlist file: %+v", err)
 
 	tracks, err := listTracks(data)
-	if err != nil {
-		log.Fatalf("could not list tracks: %+v", err)
-	}
+	failIfError("could not list tracks: %+v", err)
 
 	ids := []spotify.ID{}
 	for _, t := range tracks {
@@ -156,16 +144,12 @@ func main() {
 
 		for len(ids) > 100 {
 			_, err = client.AddTracksToPlaylist(playlist.ID, ids[0:100]...)
-			if err != nil {
-				log.Fatalf("could not add tracks to playlist %q: %v", playlistName, err)
-			}
+			failIfError("could not add tracks to playlist", err)
 			ids = ids[100:]
 		}
 
 		_, err = client.AddTracksToPlaylist(playlist.ID, ids...)
-		if err != nil {
-			log.Fatalf("could not add tracks to playlist %q: %v", playlistName, err)
-		}
+		failIfError("could not add tracks to playlist", err)
 	}
 }
 
@@ -269,4 +253,12 @@ func listTracks(data [][]string) ([]track, error) {
 	}
 
 	return tracks, nil
+}
+
+func failIfError(msg string, err error) {
+	if err == nil {
+		return
+	}
+
+	log.Fatalf("%s: %v", msg, err)
 }
