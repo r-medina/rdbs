@@ -88,7 +88,7 @@ func main() {
 	failIfError("could not read the playlist file: %+v", err)
 
 	tracks, err := listTracks(data)
-	failIfError("could not list tracks: %+v", err)
+	failIfError("could not list tracks", err)
 
 	ids := []spotify.ID{}
 	for _, t := range tracks {
@@ -191,7 +191,7 @@ func oauthClient(clientID, secretKey string) (*spotify.Client, error) {
 	select {
 	case err := <-httpDone:
 		return client, err
-	case <-time.After(20 * time.Second):
+	case <-time.After(60 * time.Second):
 		return nil, errors.New("timeout waiting for oauth token")
 	}
 }
