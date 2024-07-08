@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -69,7 +70,10 @@ func main() {
 		secretBytes, err := term.ReadPassword(int(syscall.Stdin))
 		failIfError("error reading Spotify secret key", err)
 		spotifySecret = string(secretBytes)
+		fmt.Println() // newline after secret
 	}
+
+	log.Println("opening browser to authenticate with spotify")
 
 	var err error
 	client, err = oauthClient(spotifyClientID, spotifySecret)
@@ -90,49 +94,56 @@ func main() {
 	tracks, err := listTracks(data)
 	failIfError("could not list tracks", err)
 
-	ids := []spotify.ID{}
-	for _, t := range tracks {
-		artist := t.Artist
-		title := t.Title
+	wg := sync.WaitGroup{}
+	for i, t := range tracks {
+		wg.Add(1)
+		go func(i int, t Track) {
+			defer wg.Done()
+			artist := t.Artist
+			title := t.Title
 
-		fmt.Printf("\t%s - %s\n", artist, title)
+			fmt.Printf("\t%s - %s\n", artist, title)
 
-		// spotify doesnt like the (Original Mix) or (Someone
-		// Remix) that dance music uses
-		// also doesnt like "feat"
+			// spotify doesnt like the (Original Mix) or (Someone
+			// Remix) that dance music uses
+			// also doesnt like "feat"
 
-		title = strings.ToLower(title)
-		title = strings.ReplaceAll(title, "original mix", "")
-		title = strings.ReplaceAll(title, "(", "")
-		title = strings.ReplaceAll(title, ")", "")
-		title = strings.ReplaceAll(title, "feat.", "")
+			title = strings.ToLower(title)
+			title = strings.ReplaceAll(title, "original mix", "")
+			title = strings.ReplaceAll(title, "(", "")
+			title = strings.ReplaceAll(title, ")", "")
+			title = strings.ReplaceAll(title, "feat.", "")
 
-		end := len(artist)
-		if i := strings.Index(artist, "("); i > 0 {
-			end = i
-		}
-		artist = artist[0:end]
-
-		q := fmt.Sprintf("%s %s\n", artist, title)
-		results, err := client.Search(q, spotify.SearchTypeTrack)
-		if err != nil {
-			log.Printf("spotify search failed: %+v", err)
-			continue
-		}
-
-		if results.Tracks != nil {
-			if len(results.Tracks.Tracks) == 0 {
-				log.Printf("could not find '%s - %s'", artist, title)
-				continue
+			end := len(artist)
+			if i := strings.Index(artist, "("); i > 0 {
+				end = i
 			}
-			track := results.Tracks.Tracks[0]
+			artist = artist[0:end]
 
-			if dry {
-				fmt.Printf("\t\t%s - %s %q\n", track.Name, track.Artists[0].Name, track.ID)
+			q := fmt.Sprintf("%s %s\n", artist, title)
+			results, err := client.Search(q, spotify.SearchTypeTrack)
+			if err != nil {
+				log.Printf("spotify search failed: %+v", err)
+				return
 			}
-			ids = append(ids, track.ID)
-		}
+
+			if results.Tracks != nil {
+				if len(results.Tracks.Tracks) == 0 {
+					log.Printf("could not find '%s - %s'", artist, title)
+					return
+				}
+				track := results.Tracks.Tracks[0]
+
+				if dry {
+					fmt.Printf("\t\t%s - %s %q\n", track.Name, track.Artists[0].Name, track.ID)
+				}
+
+				tracks[i].SpotifyTitle = track.Name
+				tracks[i].SpotifyID = track.ID
+			}
+		}(i, t)
 	}
+	wg.Wait()
 
 	if !dry {
 		log.Println("adding songs to playlist")
@@ -142,14 +153,29 @@ func main() {
 		// length 100 and then finish off the remaining ones
 		// at the end
 
-		for len(ids) > 100 {
-			_, err = client.AddTracksToPlaylist(playlist.ID, ids[0:100]...)
-			failIfError("could not add tracks to playlist", err)
-			ids = ids[100:]
+		// for len(tracks) > 100 {
+		// 	_, err = client.AddTracksToPlaylist(playlist.ID, tracks[0:100]...)
+		// 	failIfError("could not add tracks to playlist", err)
+		// 	tracks = tracks[100:]
+		// }
+
+		// add tracks individually to print error
+		// messages
+		for _, track := range tracks {
+			if track.SpotifyID == "" {
+				continue
+			}
+
+			_, err = client.AddTracksToPlaylist(playlist.ID, track.SpotifyID)
+			if err != nil {
+				// grab the track name
+				log.Printf("could not add track %q to playlist: %+v", track.SpotifyTitle, err)
+			}
+
 		}
 
-		_, err = client.AddTracksToPlaylist(playlist.ID, ids...)
-		failIfError("could not add tracks to playlist", err)
+		// _, err = client.AddTracksToPlaylist(playlist.ID, ids...)
+		// failIfError("could not add tracks to playlist", err)
 	}
 }
 
@@ -184,6 +210,8 @@ func oauthClient(clientID, secretKey string) (*spotify.Client, error) {
 		http.ListenAndServe("localhost:8666", nil)
 	}()
 
+	// print brower url in case it doesnt open automatically
+	fmt.Printf("opening browser to %s\n", auth.AuthURL(""))
 	if err := open.Run(auth.AuthURL("")); err != nil {
 		return nil, err
 	}
@@ -191,14 +219,16 @@ func oauthClient(clientID, secretKey string) (*spotify.Client, error) {
 	select {
 	case err := <-httpDone:
 		return client, err
-	case <-time.After(60 * time.Second):
+	case <-time.After(120 * time.Second):
 		return nil, errors.New("timeout waiting for oauth token")
 	}
 }
 
-type track struct {
-	Artist string
-	Title  string
+type Track struct {
+	Artist       string
+	Title        string
+	SpotifyTitle string
+	SpotifyID    spotify.ID
 }
 
 func readData(fname string) ([][]string, error) {
@@ -222,8 +252,8 @@ func readData(fname string) ([][]string, error) {
 	return records, nil
 }
 
-func listTracks(data [][]string) ([]track, error) {
-	var tracks []track
+func listTracks(data [][]string) ([]Track, error) {
+	var tracks []Track
 	var ia int
 	var it int
 	for i, d := range data {
@@ -249,7 +279,7 @@ func listTracks(data [][]string) ([]track, error) {
 		artist = strings.TrimSpace(artist)
 		title = strings.TrimSpace(title)
 
-		tracks = append(tracks, track{Artist: artist, Title: title})
+		tracks = append(tracks, Track{Artist: artist, Title: title})
 	}
 
 	return tracks, nil
