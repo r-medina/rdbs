@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	osuser "os/user"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,9 +21,15 @@ import (
 	"github.com/pkg/errors"
 	"github.com/skratchdot/open-golang/open"
 	"github.com/zmb3/spotify"
+
+	"github.com/r-medina/rdbs"
 )
 
-var dry bool
+var (
+	dry         bool
+	rekordbox   bool
+	RekordboxDB = "/Users/%s/Library/Pioneer/rekordbox/master.db"
+)
 
 func help() {
 	fmt.Println(`rdbs [-d] <playlist-name> <playlist-file>
@@ -31,6 +38,7 @@ func help() {
 
 func init() {
 	flag.BoolVar(&dry, "d", false, "dry run")
+	flag.BoolVar(&rekordbox, "r", false, "use rekordbox")
 }
 
 func main() {
@@ -47,9 +55,9 @@ func main() {
 	}
 
 	playlistName := flag.Args()[0]
-	playlistFile := flag.Args()[1]
+	playlistLocation := flag.Args()[1]
 
-	log.Printf("loading %q into spotify as %q", playlistFile, playlistName)
+	log.Printf("loading %q into spotify as %q", playlistLocation, playlistName)
 
 	var client *spotify.Client
 	var playlist *spotify.FullPlaylist
@@ -88,13 +96,43 @@ func main() {
 		failIfError("could not create playlist", err)
 	}
 
-	data, err := readData(playlistFile)
-	failIfError("could not read the playlist file: %+v", err)
+	var tracks []Track
+	if !rekordbox {
+		data, err := readData(playlistLocation)
+		failIfError("could not read the playlist file: %+v", err)
+		tracks, err = listTracks(data)
+		failIfError("could not list tracks", err)
+	} else {
+		rekordboxDB := os.Getenv("REKORDBOX_DB")
+		if rekordboxDB != "" {
+			RekordboxDB = rekordboxDB
+		} else {
+			u, err := osuser.Current()
+			failIfError("getting user for finding rekordbox db", err)
+			RekordboxDB = fmt.Sprintf(RekordboxDB, u.Username)
+		}
 
-	tracks, err := listTracks(data)
-	failIfError("could not list tracks", err)
+		log.Printf("opening db %s", RekordboxDB)
+		db, err := rdbs.OpenDB(RekordboxDB)
+		failIfError("opening rekordbox db", err)
+		defer db.Close()
+
+		log.Printf("opened rekordbox db")
+
+		songs, err := rdbs.GetPlaylistSongs(db, playlistLocation)
+		failIfError("reading playlist songs", err)
+
+		log.Println("got songs")
+		for _, song := range songs {
+			tracks = append(tracks, Track{
+				Artist: song.Artist,
+				Title:  song.Title,
+			})
+		}
+	}
 
 	wg := sync.WaitGroup{}
+	log.Println("searching for songs on spotify")
 	for i, t := range tracks {
 		wg.Add(1)
 		go func(i int, t Track) {
@@ -120,7 +158,7 @@ func main() {
 			}
 			artist = artist[0:end]
 
-			q := fmt.Sprintf("%s %s\n", artist, title)
+			q := fmt.Sprintf("%s %s", artist, title)
 			results, err := client.Search(q, spotify.SearchTypeTrack)
 			if err != nil {
 				log.Printf("spotify search failed: %+v", err)
@@ -135,7 +173,7 @@ func main() {
 				track := results.Tracks.Tracks[0]
 
 				if dry {
-					fmt.Printf("\t\t%s - %s %q\n", track.Name, track.Artists[0].Name, track.ID)
+					fmt.Printf("\t%s - %s %q\n", track.Artists[0].Name, track.Name, track.ID)
 				}
 
 				tracks[i].SpotifyTitle = track.Name
@@ -148,19 +186,7 @@ func main() {
 	if !dry {
 		log.Println("adding songs to playlist")
 
-		// we have to break the request into chunks of 100
-		// songs to do this, we loop over chunks of `ids` of
-		// length 100 and then finish off the remaining ones
-		// at the end
-
-		// for len(tracks) > 100 {
-		// 	_, err = client.AddTracksToPlaylist(playlist.ID, tracks[0:100]...)
-		// 	failIfError("could not add tracks to playlist", err)
-		// 	tracks = tracks[100:]
-		// }
-
-		// add tracks individually to print error
-		// messages
+		// do this one by one to print errors better
 		for _, track := range tracks {
 			if track.SpotifyID == "" {
 				continue
@@ -173,9 +199,6 @@ func main() {
 			}
 
 		}
-
-		// _, err = client.AddTracksToPlaylist(playlist.ID, ids...)
-		// failIfError("could not add tracks to playlist", err)
 	}
 }
 

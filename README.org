@@ -19,15 +19,17 @@ playlists into Spotify.
 
      put them into the environment as =SPOTIFY_ID= and =SPOTIFY_SECRET=
 
-  3. export a Rekordbox playlist to a =.txt= file
+** manual rekordbox export
+
+  1. export a Rekordbox playlist to a =.txt= file
 
      - right click the playlist and click "Export a playlist to a
        file" → "Export a playlist to a file for KUVO (*.txt)"
 
-  4. use this program
+  2. use this program
 
      #+begin_src shell
-       rdbs <your-playlist-name> <location-of-exported-plylist-txt-file>
+       rdbs <your-spotify-playlist-name> <location-of-exported-plylist-txt-file>
      #+end_src
 
      running this will open a browser which will grant this app
@@ -35,3 +37,15 @@ playlists into Spotify.
 
      after you've authorized it, it will make a playlist with the
      tracks in the file and log the names of any tracks it didn't find
+
+** straight from rekordbox db (macos only)
+
+the following assumed you have =SPOTIFY_ID= and =SPOTIFY_SECRET= set
+appropriately. it also assumes your rekordbox database is in
+=~/Library/Pioneer/Rekordbox/master.db=. If you have it somewhere
+else, you can set the environment variable =REKORDBOX_DB= to another
+absolute path.
+
+#+begin_src sh
+  rdbs -r <your-spotify-playlist-name> <playlist-name-in-rekordbox>
+#+end_src
