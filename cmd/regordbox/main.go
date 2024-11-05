@@ -6,7 +6,8 @@ import (
 	"os"
 
 	_ "github.com/mutecomm/go-sqlcipher/v4"
-	"github.com/r-medina/rdbs"
+
+	"github.com/r-medina/rdbs/rekordbox"
 )
 
 func main() {
@@ -19,13 +20,13 @@ func main() {
 	dbLocation := os.Args[1]
 	playlistName := os.Args[2]
 
-	db, err := rdbs.OpenDB(dbLocation)
+	db, err := rekordbox.OpenDB(dbLocation)
 	if err != nil {
 		log.Fatalf("opening database: %v", err)
 	}
 	defer db.Close()
 
-	songs, err := rdbs.GetPlaylistSongs(db, playlistName)
+	songs, err := rekordbox.GetPlaylistTracks(db, playlistName)
 	if err != nil {
 		log.Fatalf("getting playlist songs: %v", err)
 	}

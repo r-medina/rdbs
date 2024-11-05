@@ -6,11 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	osuser "os/user"
+	"os/user"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -19,32 +17,41 @@ import (
 	"golang.org/x/text/transform"
 
 	"github.com/pkg/errors"
-	"github.com/skratchdot/open-golang/open"
 	"github.com/zmb3/spotify"
 
 	"github.com/r-medina/rdbs"
+	"github.com/r-medina/rdbs/rekordbox"
 )
 
 var (
-	dry         bool
-	rekordbox   bool
-	RekordboxDB = "/Users/%s/Library/Pioneer/rekordbox/master.db"
+	dry            bool
+	useRekordbox   bool
+	uploadAll      bool
+	folderName     string
+	rekordboxDBFmt = "/Users/%s/Library/Pioneer/rekordbox/master.db"
+	manyPlaylists  int
 )
 
 func help() {
-	fmt.Println(`rdbs [-d] <playlist-name> <playlist-file>
-	-d	dry run (only search song names - don't make playlist)`)
+	fmt.Println(`rdbs [-d] [-r] [-a] [<spotify-playlist-name> <playlist-location>]
+	-d	dry run (only search song names - don't make playlist)
+	-r	read from rekordbox database instead of file
+	-a	upload all rekordbox playlists to spotify
+	-n      number of playlists to upload`)
 }
 
 func init() {
 	flag.BoolVar(&dry, "d", false, "dry run")
-	flag.BoolVar(&rekordbox, "r", false, "use rekordbox")
+	flag.BoolVar(&useRekordbox, "r", false, "use rekordbox")
+	flag.BoolVar(&uploadAll, "a", false, "upload all rekordbox playlists to spotify")
+	flag.StringVar(&folderName, "f", "rdbs", "optional folder name to group playlists in spotify")
+	flag.IntVar(&manyPlaylists, "n", 1, "number of playlists to upload")
 }
 
 func main() {
 	flag.Parse()
 
-	if flag.NArg() < 2 {
+	if flag.NArg() < 2 && !uploadAll {
 		help()
 		os.Exit(1)
 	}
@@ -54,13 +61,6 @@ func main() {
 		log.Println("executing dry run")
 	}
 
-	playlistName := flag.Args()[0]
-	playlistLocation := flag.Args()[1]
-
-	log.Printf("loading %q into spotify as %q", playlistLocation, playlistName)
-
-	var client *spotify.Client
-	var playlist *spotify.FullPlaylist
 	spotifyClientID := os.Getenv("SPOTIFY_ID")
 	spotifySecret := os.Getenv("SPOTIFY_SECRET")
 
@@ -84,174 +84,74 @@ func main() {
 	log.Println("opening browser to authenticate with spotify")
 
 	var err error
-	client, err = oauthClient(spotifyClientID, spotifySecret)
+	spotifyClient, err := rdbs.SpotifyOAuthClient(spotifyClientID, spotifySecret)
 	failIfError("oauth client failed", err)
 
-	user, err := client.CurrentUser()
+	spotifyUser, err := spotifyClient.CurrentUser()
 	failIfError("could not get current user", err)
-	log.Printf("user: %s", user.DisplayName)
+	log.Printf("user: %s", spotifyUser.DisplayName)
 
-	if !dry {
-		playlist, err = client.CreatePlaylistForUser(user.ID, playlistName, "exported from rekordbox", false)
-		failIfError("could not create playlist", err)
+	rekordboxDB := os.Getenv("REKORDBOX_DB")
+	if rekordboxDB == "" {
+		u, err := user.Current()
+		failIfError("getting user for finding rekordbox db", err)
+		rekordboxDB = fmt.Sprintf(rekordboxDBFmt, u.Username)
 	}
 
-	var tracks []Track
-	if !rekordbox {
-		data, err := readData(playlistLocation)
-		failIfError("could not read the playlist file: %+v", err)
-		tracks, err = listTracks(data)
-		failIfError("could not list tracks", err)
+	db, err := rekordbox.OpenDB(rekordboxDB)
+	failIfError("opening rekordbox db", err)
+	defer db.Close()
+
+	if uploadAll {
+		log.Println("uploading all playlists to Spotify")
+		playlists, err := rekordbox.GetAllPlaylists(db)
+		failIfError("could not retrieve all playlists", err)
+		for _, playlist := range playlists[:manyPlaylists] {
+			log.Printf("loading playlist %q into spotify", playlist.Name)
+			tracks, err := rekordbox.GetPlaylistTracks(db, playlist.ID)
+			failIfError("reading playlist tracks", err)
+			uploadPlaylist(spotifyClient, spotifyUser.ID, playlist.Name, tracks)
+			time.Sleep(2 * time.Second)
+		}
 	} else {
-		rekordboxDB := os.Getenv("REKORDBOX_DB")
-		if rekordboxDB != "" {
-			RekordboxDB = rekordboxDB
+		playlistName := flag.Args()[0]
+		playlistLocation := flag.Args()[1]
+		log.Printf("loading %q into spotify as %q", playlistLocation, playlistName)
+		var tracks []rdbs.Track
+		if !useRekordbox {
+			data, err := readData(playlistLocation)
+			failIfError("could not read the playlist file: %+v", err)
+			tracks, err = listTracks(data)
+			failIfError("could not list tracks", err)
 		} else {
-			u, err := osuser.Current()
-			failIfError("getting user for finding rekordbox db", err)
-			RekordboxDB = fmt.Sprintf(RekordboxDB, u.Username)
+			tracks, err = rekordbox.GetPlaylistTracks(db, playlistLocation)
+			failIfError("reading playlist tracks", err)
 		}
-
-		log.Printf("opening db %s", RekordboxDB)
-		db, err := rdbs.OpenDB(RekordboxDB)
-		failIfError("opening rekordbox db", err)
-		defer db.Close()
-
-		log.Printf("opened rekordbox db")
-
-		songs, err := rdbs.GetPlaylistSongs(db, playlistLocation)
-		failIfError("reading playlist songs", err)
-
-		log.Println("got songs")
-		for _, song := range songs {
-			tracks = append(tracks, Track{
-				Artist: song.Artist,
-				Title:  song.Title,
-			})
-		}
+		uploadPlaylist(spotifyClient, spotifyUser.ID, playlistName, tracks)
 	}
+}
 
-	wg := sync.WaitGroup{}
-	log.Println("searching for songs on spotify")
-	for i, t := range tracks {
-		wg.Add(1)
-		go func(i int, t Track) {
-			defer wg.Done()
-			artist := t.Artist
-			title := t.Title
-
-			fmt.Printf("\t%s - %s\n", artist, title)
-
-			// spotify doesnt like the (Original Mix) or (Someone
-			// Remix) that dance music uses
-			// also doesnt like "feat"
-
-			title = strings.ToLower(title)
-			title = strings.ReplaceAll(title, "original mix", "")
-			title = strings.ReplaceAll(title, "(", "")
-			title = strings.ReplaceAll(title, ")", "")
-			title = strings.ReplaceAll(title, "feat.", "")
-
-			end := len(artist)
-			if i := strings.Index(artist, "("); i > 0 {
-				end = i
-			}
-			artist = artist[0:end]
-
-			q := fmt.Sprintf("%s %s", artist, title)
-			results, err := client.Search(q, spotify.SearchTypeTrack)
-			if err != nil {
-				log.Printf("spotify search failed: %+v", err)
-				return
-			}
-
-			if results.Tracks != nil {
-				if len(results.Tracks.Tracks) == 0 {
-					log.Printf("could not find '%s - %s'", artist, title)
-					return
-				}
-				track := results.Tracks.Tracks[0]
-
-				if dry {
-					fmt.Printf("\t%s - %s %q\n", track.Artists[0].Name, track.Name, track.ID)
-				}
-
-				tracks[i].SpotifyTitle = track.Name
-				tracks[i].SpotifyID = track.ID
-			}
-		}(i, t)
-	}
-	wg.Wait()
-
+func uploadPlaylist(spotifyClient *spotify.Client, userID, playlistName string, tracks []rdbs.Track) {
 	if !dry {
+		playlist, err := spotifyClient.CreatePlaylistForUser(userID, fmt.Sprintf("%s/%s", folderName, playlistName), "exported from rekordbox", false)
+		failIfError("could not create playlist", err)
+		spotifyTracks, err := rdbs.SpotifySearch(spotifyClient, tracks)
+		failIfError("searching on spotify", err)
 		log.Println("adding songs to playlist")
-
-		// do this one by one to print errors better
-		for _, track := range tracks {
-			if track.SpotifyID == "" {
+		for _, spotifyTrack := range spotifyTracks {
+			if spotifyTrack.ID == "" {
 				continue
 			}
-
-			_, err = client.AddTracksToPlaylist(playlist.ID, track.SpotifyID)
+			_, err = spotifyClient.AddTracksToPlaylist(playlist.ID, spotifyTrack.ID)
 			if err != nil {
-				// grab the track name
-				log.Printf("could not add track %q to playlist: %+v", track.SpotifyTitle, err)
+				log.Printf("could not add track %q to playlist: %+v", spotifyTrack.Name, err)
 			}
-
+		}
+	} else {
+		for _, track := range tracks {
+			fmt.Printf("\t%s - %s\n", track.Artist, track.Title)
 		}
 	}
-}
-
-func oauthClient(clientID, secretKey string) (*spotify.Client, error) {
-	auth := spotify.NewAuthenticator("http://localhost:8666/", spotify.ScopePlaylistModifyPrivate)
-	auth.SetAuthInfo(clientID, secretKey)
-
-	var client *spotify.Client
-	httpDone := make(chan error)
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			log.Println(r.Method, r.URL.Path)
-			return
-		}
-		defer close(httpDone)
-
-		token, err := auth.Token("", r)
-		if err != nil {
-			log.Println("error getting token:", err)
-			http.Error(w, "failed to get token", http.StatusNotFound)
-			httpDone <- errors.Wrap(err, "failed to get token")
-			return
-		}
-		c := auth.NewClient(token)
-		client = &c
-
-		fmt.Fprintf(w, `you may close this webpage`)
-	})
-
-	go func() {
-		http.ListenAndServe("localhost:8666", nil)
-	}()
-
-	// print brower url in case it doesnt open automatically
-	fmt.Printf("opening browser to %s\n", auth.AuthURL(""))
-	if err := open.Run(auth.AuthURL("")); err != nil {
-		return nil, err
-	}
-
-	select {
-	case err := <-httpDone:
-		return client, err
-	case <-time.After(120 * time.Second):
-		return nil, errors.New("timeout waiting for oauth token")
-	}
-}
-
-type Track struct {
-	Artist       string
-	Title        string
-	SpotifyTitle string
-	SpotifyID    spotify.ID
 }
 
 func readData(fname string) ([][]string, error) {
@@ -275,8 +175,8 @@ func readData(fname string) ([][]string, error) {
 	return records, nil
 }
 
-func listTracks(data [][]string) ([]Track, error) {
-	var tracks []Track
+func listTracks(data [][]string) ([]rdbs.Track, error) {
+	var tracks []rdbs.Track
 	var ia int
 	var it int
 	for i, d := range data {
@@ -288,23 +188,15 @@ func listTracks(data [][]string) ([]Track, error) {
 					it = j
 				}
 			}
-
 			continue
 		}
-
 		if len(d) < 4 {
 			continue
 		}
-
-		artist := d[ia]
-		title := d[it]
-
-		artist = strings.TrimSpace(artist)
-		title = strings.TrimSpace(title)
-
-		tracks = append(tracks, Track{Artist: artist, Title: title})
+		artist := strings.TrimSpace(d[ia])
+		title := strings.TrimSpace(d[it])
+		tracks = append(tracks, rdbs.Track{Artist: artist, Title: title})
 	}
-
 	return tracks, nil
 }
 
@@ -312,6 +204,5 @@ func failIfError(msg string, err error) {
 	if err == nil {
 		return
 	}
-
 	log.Fatalf("%s: %v", msg, err)
 }
