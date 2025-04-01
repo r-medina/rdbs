@@ -10,7 +10,6 @@ import (
 	"os/user"
 	"strings"
 	"syscall"
-	"time"
 
 	"golang.org/x/term"
 	"golang.org/x/text/encoding/unicode"
@@ -103,16 +102,16 @@ func main() {
 	defer db.Close()
 
 	if uploadAll {
-		log.Println("uploading all playlists to Spotify")
-		playlists, err := rekordbox.GetAllPlaylists(db)
-		failIfError("could not retrieve all playlists", err)
-		for _, playlist := range playlists[:manyPlaylists] {
-			log.Printf("loading playlist %q into spotify", playlist.Name)
-			tracks, err := rekordbox.GetPlaylistTracks(db, playlist.ID)
-			failIfError("reading playlist tracks", err)
-			uploadPlaylist(spotifyClient, spotifyUser.ID, playlist.Name, tracks)
-			time.Sleep(2 * time.Second)
-		}
+		log.Println("uploading all playlists to Spotify - just kidding")
+		// playlists, err := rekordbox.GetAllPlaylists(db)
+		// failIfError("could not retrieve all playlists", err)
+		// for _, playlist := range playlists[:manyPlaylists] {
+		// 	log.Printf("loading playlist %q into spotify", playlist.Name)
+		// 	tracks, err := rekordbox.GetPlaylistTracks(db, playlist.ID)
+		// 	failIfError("reading playlist tracks", err)
+		// 	uploadPlaylist(spotifyClient, spotifyUser.ID, playlist.Name, tracks)
+		// 	time.Sleep(2 * time.Second)
+		// }
 	} else {
 		playlistName := flag.Args()[0]
 		playlistLocation := flag.Args()[1]
@@ -124,7 +123,9 @@ func main() {
 			tracks, err = listTracks(data)
 			failIfError("could not list tracks", err)
 		} else {
-			tracks, err = rekordbox.GetPlaylistTracks(db, playlistLocation)
+			playlists, err := rekordbox.GetPlaylistInfo(db, playlistLocation)
+			failIfError("getting playlist info", err)
+			tracks, err = rekordbox.GetPlaylistTracks(db, playlists[0].ID)
 			failIfError("reading playlist tracks", err)
 		}
 		uploadPlaylist(spotifyClient, spotifyUser.ID, playlistName, tracks)
@@ -179,17 +180,14 @@ func listTracks(data [][]string) ([]rdbs.Track, error) {
 	var tracks []rdbs.Track
 	var ia int
 	var it int
-	for i, d := range data {
-		if i == 0 {
-			for j, field := range d {
-				if field == "Artist" {
-					ia = j
-				} else if field == "Track Title" {
-					it = j
-				}
-			}
-			continue
+	for j, field := range data[0] {
+		if field == "Artist" {
+			ia = j
+		} else if field == "Track Title" {
+			it = j
 		}
+	}
+	for _, d := range data[1:] {
 		if len(d) < 4 {
 			continue
 		}

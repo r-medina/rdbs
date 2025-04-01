@@ -26,14 +26,50 @@ func OpenDB(file string) (*sql.DB, error) {
 	return sql.Open("sqlite3", dsn)
 }
 
+type PlaylistInfo struct {
+	ID         string
+	Name       string
+	ParentID   string
+	ParentName string
+	Seq        string
+}
+
+func GetPlaylistInfo(db *sql.DB, name string) ([]PlaylistInfo, error) {
+	query := `SELECT p.ID, p.Name, p.ParentID, p.Seq, parent.Name as ParentName
+	FROM djmdPlaylist p
+	LEFT JOIN djmdPlaylist parent ON p.ParentID = parent.ID
+	WHERE p.Name = ?
+	ORDER BY p.ParentID DESC, p.Seq DESC;`
+
+	rows, err := db.Query(query, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute query for playlist '%s': %w", name, err)
+	}
+	defer rows.Close()
+
+	var playlists []PlaylistInfo
+	for rows.Next() {
+		var playlist PlaylistInfo
+		if err := rows.Scan(&playlist.ID, &playlist.Name, &playlist.ParentID, &playlist.Seq, &playlist.ParentName); err != nil {
+			return nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+		playlists = append(playlists, playlist)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over rows: %w", err)
+	}
+
+	return playlists, nil
+}
+
 func GetPlaylistTracks(db *sql.DB, playlistID string) ([]rdbs.Track, error) {
 	query := `SELECT c.Title, a.Name
-		FROM djmdSongPlaylist sp
-		JOIN djmdContent c ON sp.ContentID = c.ID
-		JOIN djmdArtist a ON c.ArtistID = a.ID
-		JOIN djmdPlaylist p ON sp.PlaylistID = p.ID
-		WHERE p.ID = ?
-		ORDER BY sp.TrackNo` // Order by TrackNo to maintain playlist order
+FROM djmdSongPlaylist sp
+JOIN djmdContent c ON sp.ContentID = c.ID
+JOIN djmdArtist a ON c.ArtistID = a.ID
+WHERE sp.PlaylistID = ?
+ORDER BY sp.TrackNo;`
 
 	rows, err := db.Query(query, playlistID)
 	if err != nil {
