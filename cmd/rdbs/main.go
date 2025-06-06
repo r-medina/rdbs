@@ -97,7 +97,7 @@ func main() {
 		rekordboxDB = fmt.Sprintf(rekordboxDBFmt, u.Username)
 	}
 
-	db, err := rekordbox.OpenDB(rekordboxDB)
+	db, err := rekordbox.New(rekordbox.WithDBLocation(rekordboxDB))
 	failIfError("opening rekordbox db", err)
 	defer db.Close()
 
@@ -123,9 +123,9 @@ func main() {
 			tracks, err = listTracks(data)
 			failIfError("could not list tracks", err)
 		} else {
-			playlists, err := rekordbox.GetPlaylistInfo(db, playlistLocation)
+			playlists, err := db.GetPlaylistInfo(playlistLocation)
 			failIfError("getting playlist info", err)
-			tracks, err = rekordbox.GetPlaylistTracks(db, playlists[0].ID)
+			tracks, err = db.GetPlaylistTracks(playlists[0].ID)
 			failIfError("reading playlist tracks", err)
 		}
 		uploadPlaylist(spotifyClient, spotifyUser.ID, playlistName, tracks)
