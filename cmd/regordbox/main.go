@@ -18,244 +18,225 @@ import (
 	"github.com/r-medina/rdbs/rekordbox"
 )
 
-var (
-	dbLocation string
+// Config holds all configuration for the CLI
+type Config struct {
+	DBLocation          string
+	SpotifyClientID     string
+	SpotifySecret       string
+	SpotifyPlaylistName string
+	RekordboxPlaylist   string
+}
 
+var config Config
+
+var (
 	rootCmd = &cobra.Command{
 		Use:   "rdbs",
 		Short: "Rekordbox playlist management tool",
+		Long:  "A CLI tool for managing Rekordbox playlists and syncing them to Spotify",
 	}
 	selectCmd = &cobra.Command{
 		Use:   "select",
 		Short: "Select a playlist and display its tracks",
+		Long:  "Interactively select a Rekordbox playlist and display all tracks in it",
 		Run:   runSelect,
 	}
 	treeCmd = &cobra.Command{
 		Use:   "tree",
 		Short: "Print the Rekordbox playlist directory tree",
+		Long:  "Display the complete Rekordbox playlist hierarchy as a directory tree",
 		Run:   runTree,
 	}
 	spotifyCmd = &cobra.Command{
 		Use:   "spotify",
-		Short: "Sync a Rekordbox playlist into Spotify",
+		Short: "Sync a Rekordbox playlist to Spotify",
+		Long:  "Create or update a Spotify playlist with tracks from a Rekordbox playlist",
 		Run:   runSpotify,
 	}
-
-	spotifyClientID     string
-	spotifySecret       string
-	spotifyPlaylistName string
-	rekordboxPlaylist   string
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// Define global flag
-	rootCmd.PersistentFlags().StringVar(&dbLocation, "db", "", "path to the rekordbox database file (default: system default)")
+	setupFlags()
+	setupCommands()
 
-	// Define local flags
-	spotifyCmd.Flags().StringVar(&spotifyClientID, "spotify-client-id", "", "Spotify client ID")
+	failIfError("Command execution faile", rootCmd.Execute())
+}
+
+func setupFlags() {
+	// Global flags
+	rootCmd.PersistentFlags().StringVar(&config.DBLocation, "db", "",
+		"Path to the Rekordbox database file (default: system default)")
+
+	// Spotify command flags
+	spotifyCmd.Flags().StringVar(&config.SpotifyClientID, "spotify-client-id", "",
+		"Spotify client ID (required)")
 	spotifyCmd.MarkFlagRequired("spotify-client-id")
-	spotifyCmd.Flags().StringVar(&spotifySecret, "spotify-secret", "", "Spotify secret")
-	spotifyCmd.Flags().StringVar(
-		&spotifyPlaylistName,
-		"spotify-playlist-name",
-		"",
-		"Name of spotify playlist - if it already exists, songs are added",
-	)
-	spotifyCmd.Flags().StringVar(
-		&rekordboxPlaylist,
-		"rekordbox-playlist-name",
-		"",
-		"Name of Rekordbox playlist",
-	)
-	// Add commands
+
+	spotifyCmd.Flags().StringVar(&config.SpotifySecret, "spotify-secret", "",
+		"Spotify client secret (will prompt if not provided)")
+
+	spotifyCmd.Flags().StringVar(&config.SpotifyPlaylistName, "spotify-playlist-name", "",
+		"Name of Spotify playlist (will prompt if not provided)")
+
+	spotifyCmd.Flags().StringVar(&config.RekordboxPlaylist, "rekordbox-playlist-name", "",
+		"Name of Rekordbox playlist (will prompt if not provided)")
+}
+
+func setupCommands() {
 	rootCmd.AddCommand(selectCmd)
 	rootCmd.AddCommand(treeCmd)
 	rootCmd.AddCommand(spotifyCmd)
-
-	// Execute the root command
-	failIfError("executing command", rootCmd.Execute())
 }
 
 func runSelect(cmd *cobra.Command, args []string) {
-	db, err := initializeDB()
-	failIfError("initializing database", err)
+	db := mustInitializeDB()
 	defer db.Close()
 
-	playlist, pathName := selectRekordboxPlaylist(db)
+	playlist, pathName := mustSelectRekordboxPlaylist(db)
+	tracks := mustGetPlaylistTracks(db, playlist.ID)
 
-	// Get tracks for the selected playlist
-	songs, err := db.GetPlaylistTracks(playlist.ID)
-	failIfError("getting playlist songs", err)
-
-	// Print the songs
-	fmt.Printf("\nTracks in %s:\n", pathName)
-	fmt.Println("==================================")
-	for _, song := range songs {
-		fmt.Printf("%s - %s\n", song.Artist, song.Title)
-	}
+	printTrackList(tracks, pathName)
 }
 
 func runTree(cmd *cobra.Command, args []string) {
-	db, err := initializeDB()
-	if err != nil {
-		log.Fatalf("initializing database: %v", err)
-	}
+	db := mustInitializeDB()
 	defer db.Close()
 
-	// Get the complete playlist hierarchy
-	hierarchy, err := db.GetPlaylistHierarchy()
-	if err != nil {
-		log.Fatalf("getting playlist hierarchy: %v", err)
-	}
-
-	// Print the directory tree
-	fmt.Println("Rekordbox Playlist Directory Tree:")
-	fmt.Println("==================================")
-	printDirectoryTree(hierarchy, "", true)
+	hierarchy := mustGetPlaylistHierarchy(db)
+	printDirectoryTree(hierarchy)
 }
 
 func runSpotify(cmd *cobra.Command, args []string) {
-	db, err := initializeDB()
-	failIfError("initializing database", err)
+	db := mustInitializeDB()
 	defer db.Close()
 
-	if spotifySecret == "" {
-		fmt.Print("input your Spotify secret key: ")
-		secretBytes, err := term.ReadPassword(int(syscall.Stdin))
-		failIfError("error reading Spotify secret key", err)
-		spotifySecret = string(secretBytes)
-		fmt.Println() // newline after secret
-	}
+	// Get Spotify credentials and authenticate
+	ensureSpotifySecret()
+	spotifyClient := mustAuthenticateSpotify()
 
-	log.Println("opening browser to authenticate with spotify")
+	// Get or create Spotify playlist
+	spotifyUser := mustGetCurrentSpotifyUser(spotifyClient)
+	spotifyPlaylistID := mustGetOrCreateSpotifyPlaylist(spotifyClient, spotifyUser.ID)
 
-	spotifyClient, err := rdbs.SpotifyOAuthClient(spotifyClientID, spotifySecret)
-	failIfError("oauth client failed", err)
+	// Get Rekordbox playlist and tracks
+	rekordboxPlaylistID := mustSelectRekordboxPlaylistID(db)
+	tracks := mustGetPlaylistTracks(db, rekordboxPlaylistID)
 
-	spotifyUser, err := spotifyClient.CurrentUser()
-	failIfError("could not get current user", err)
-	log.Printf("user: %s", spotifyUser.DisplayName)
-
-	if spotifyPlaylistName == "" {
-		prompt := promptui.Prompt{Label: "Name to be used for Spotify playlist"}
-		spotifyPlaylistName, err = prompt.Run()
-		failIfError("selecting Spotify playlist name", err)
-	}
-
-	playlists, err := spotifyClient.GetPlaylistsForUser(spotifyUser.ID)
-	failIfError("getting user spotify playlists", err)
-
-	var spotifyPlaylistID spotify.ID
-	type match struct {
-		i int
-		p spotify.SimplePlaylist
-	}
-	candidates := []match{}
-
-	for i, p := range playlists.Playlists {
-		if p.Name == spotifyPlaylistName {
-			candidates = append(candidates, match{i: i, p: p})
-		}
-	}
-	if len(candidates) > 1 {
-		formatted := make([]string, len(candidates))
-		for i, p := range candidates {
-			formatted[i] = fmt.Sprintf("%s (%d)", p.p.Name, p.p.Tracks.Total)
-		}
-
-		// Prompt user to select a playlist with fuzzy search
-		prompt := promptui.Select{
-			Label:             "Select a playlist",
-			Items:             formatted,
-			Stdout:            os.Stderr,
-			StartInSearchMode: true,
-		}
-		i, _, err := prompt.Run()
-		failIfError("selecting playlist", err)
-		spotifyPlaylistID = candidates[i].p.ID
-	} else {
-		playlist, err := spotifyClient.CreatePlaylistForUser(spotifyUser.ID, spotifyPlaylistName, "exported with regordbox", false)
-		failIfError("creating playlist", err)
-		spotifyPlaylistID = playlist.ID
-	}
-
-	// get tracks from rekordbox
-
-	var rekordboxPlaylistID string
-	if rekordboxPlaylist == "" {
-		fmt.Println("here")
-		playlist, _ := selectRekordboxPlaylist(db)
-		rekordboxPlaylistID = playlist.ID
-		// Get tracks for the selected playlist
-	} else {
-		playlists, err := db.GetPlaylistInfo(rekordboxPlaylist)
-		if len(playlists) == 1 {
-			rekordboxPlaylistID = playlists[0].ID
-		} else {
-			formatted := make([]string, len(playlists))
-			for i, p := range playlists {
-				full, err := db.GetFullPlaylist(p.ID)
-				failIfError("getting full playlist", err)
-
-				formatted[i] = strings.Join(full.Path, " > ")
-			}
-			failIfError("getting playlist info", err)
-			if len(playlists) > 2 {
-				prompt := promptui.Select{
-					Label:  "Select a playlist",
-					Items:  playlists,
-					Stdout: os.Stderr,
-				}
-				i, _, err := prompt.Run()
-				failIfError("searching for rekordbox playlist", err)
-				rekordboxPlaylistID = playlists[i].ID
-			}
-		}
-	}
-
-	tracks, err := db.GetPlaylistTracks(rekordboxPlaylistID)
-	failIfError("getting playlist songs", err)
-
-	spotifyTracks, err := rdbs.SpotifySearch(spotifyClient, tracks)
-	failIfError("searching on spotify", err)
-	log.Println("adding songs to playlist")
-	for _, spotifyTrack := range spotifyTracks {
-		if spotifyTrack.ID == "" {
-			continue
-		}
-		_, err = spotifyClient.AddTracksToPlaylist(spotifyPlaylistID, spotifyTrack.ID)
-		if err != nil {
-			log.Printf("could not add track %q to playlist: %+v", spotifyTrack.Name, err)
-		}
-	}
+	// Sync to Spotify
+	syncTracksToSpotify(spotifyClient, spotifyPlaylistID, tracks)
 }
 
-func initializeDB() (*rekordbox.DB, error) {
+// Database operations
+func mustInitializeDB() *rekordbox.DB {
 	var db *rekordbox.DB
 	var err error
-	if dbLocation != "" {
-		log.Printf("using database: %s", dbLocation)
-		db, err = rekordbox.New(
-			rekordbox.WithDBLocation(dbLocation),
-		)
+
+	if config.DBLocation != "" {
+		log.Printf("Using database: %s", config.DBLocation)
+		db, err = rekordbox.New(rekordbox.WithDBLocation(config.DBLocation))
 	} else {
-		log.Printf("using system default database location")
+		log.Printf("Using system default database location")
 		db, err = rekordbox.New()
 	}
-	return db, err
+
+	failIfError("Failed to initialize database", err)
+
+	return db
 }
 
-func selectRekordboxPlaylist(db *rekordbox.DB) (*rekordbox.FullPlaylist, string) {
+func mustGetPlaylistHierarchy(db *rekordbox.DB) *rekordbox.PlaylistNode {
 	hierarchy, err := db.GetPlaylistHierarchy()
-	failIfError("getting playlist hierarchy", err)
+	failIfError("Failed to get playlist hierarchy", err)
+	return hierarchy
+}
 
-	// Collect all playlists with tracks for selection
+func mustGetPlaylistTracks(db *rekordbox.DB, playlistID string) []rdbs.Track {
+	tracks, err := db.GetPlaylistTracks(playlistID)
+	failIfError("Failed to get playlist tracks", err)
+	return tracks
+}
+
+// Playlist selection
+func mustSelectRekordboxPlaylist(db *rekordbox.DB) (*rekordbox.FullPlaylist, string) {
+	hierarchy := mustGetPlaylistHierarchy(db)
+	playlists := collectPlaylistsWithTracks(hierarchy, db)
+
+	if len(playlists) == 0 {
+		log.Fatal("No playlists with tracks found")
+	}
+
+	return selectFromPlaylistCollection(playlists)
+}
+
+func mustSelectRekordboxPlaylistID(db *rekordbox.DB) string {
+	if config.RekordboxPlaylist == "" {
+		playlist, _ := mustSelectRekordboxPlaylist(db)
+		return playlist.ID
+	}
+
+	return findPlaylistIDByName(db, config.RekordboxPlaylist)
+}
+
+func findPlaylistIDByName(db *rekordbox.DB, name string) string {
+	playlists, err := db.GetPlaylistInfo(name)
+	failIfError(fmt.Sprintf("Failed to get playlist %q info", name), err)
+
+	switch len(playlists) {
+	case 0:
+		log.Fatalf("No playlist found with name '%s'", name)
+	case 1:
+		return playlists[0].ID
+	default:
+		return selectFromMultipleMatches(db, playlists)
+	}
+	return ""
+}
+
+func selectFromMultipleMatches(db *rekordbox.DB, playlists []rekordbox.PlaylistInfo) string {
+	formatted := make([]string, len(playlists))
+	for i, p := range playlists {
+		full, err := db.GetFullPlaylist(p.ID)
+		failIfError("Failed to get full playlist info", err)
+		formatted[i] = strings.Join(full.Path, " > ")
+	}
+
+	prompt := promptui.Select{
+		Label:             "Multiple playlists found, select one",
+		Items:             formatted,
+		Stdout:            os.Stderr,
+		StartInSearchMode: true,
+	}
+
+	i, _, err := prompt.Run()
+	failIfError("Failed to select playlist", err)
+
+	return playlists[i].ID
+}
+
+func collectPlaylistsWithTracks(node *rekordbox.PlaylistNode, db *rekordbox.DB) []*rekordbox.PlaylistNode {
 	var playlists []*rekordbox.PlaylistNode
-	collectPlaylistsWithTracks(hierarchy, &playlists, db)
+	collectPlaylistsWithTracksRecursive(node, &playlists, db)
+	return playlists
+}
 
-	// Format playlist names with full path for selection
+func collectPlaylistsWithTracksRecursive(node *rekordbox.PlaylistNode, playlists *[]*rekordbox.PlaylistNode, db *rekordbox.DB) {
+	if node.Playlist != nil {
+		tracks, err := db.GetPlaylistTracks(node.Playlist.ID)
+		if err != nil {
+			log.Printf("Warning: could not get tracks for playlist %s: %v", node.Playlist.Name, err)
+		} else if len(tracks) > 0 {
+			*playlists = append(*playlists, node)
+		}
+	}
+
+	for _, child := range node.Children {
+		collectPlaylistsWithTracksRecursive(child, playlists, db)
+	}
+}
+
+func selectFromPlaylistCollection(playlists []*rekordbox.PlaylistNode) (*rekordbox.FullPlaylist, string) {
 	formatted := make([]string, len(playlists))
 	for i, p := range playlists {
 		if p.Playlist != nil {
@@ -263,15 +244,9 @@ func selectRekordboxPlaylist(db *rekordbox.DB) (*rekordbox.FullPlaylist, string)
 		}
 	}
 
-	// Get terminal height
-	_, termHeight, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		log.Printf("warning: could not get terminal size, using default select size: %v", err)
-		termHeight = 10 // Fallback to a reasonable default
-	}
+	terminalHeight := getTerminalHeight()
+	adjustedHeight := max(terminalHeight-4, 5) // Account for prompt label and padding
 
-	// Adjust termHeight to account for prompt label and some padding
-	adjustedHeight := max(termHeight-4, 5)
 	searcher := func(input string, index int) bool {
 		if index >= len(formatted) {
 			return false
@@ -279,7 +254,6 @@ func selectRekordboxPlaylist(db *rekordbox.DB) (*rekordbox.FullPlaylist, string)
 		return fuzzy.MatchFold(input, formatted[index])
 	}
 
-	// Prompt user to select a playlist with fuzzy search
 	prompt := promptui.Select{
 		Label:             "Select a playlist (type to search)",
 		Items:             formatted,
@@ -288,63 +262,218 @@ func selectRekordboxPlaylist(db *rekordbox.DB) (*rekordbox.FullPlaylist, string)
 		Searcher:          searcher,
 		StartInSearchMode: true,
 	}
-	i, _, err := prompt.Run()
-	failIfError("selecting playlist", err)
 
-	// Get tracks for the selected playlist
+	i, _, err := prompt.Run()
+	failIfError("Failed to select playlist", err)
+
 	return playlists[i].Playlist, formatted[i]
 }
 
-// printDirectoryTree recursively prints the playlist hierarchy as a tree
-func printDirectoryTree(node *rekordbox.PlaylistNode, prefix string, isLast bool) {
-	if node.Playlist != nil {
-		var connector string
-		if isLast {
-			connector = "└── "
-		} else {
-			connector = "├── "
-		}
-		fmt.Printf("%s%s%s\n", prefix, connector, node.Playlist.Name)
-		var childPrefix string
-		if isLast {
-			childPrefix = prefix + "    "
-		} else {
-			childPrefix = prefix + "│   "
-		}
-		printChildren(node, childPrefix)
-	} else {
-		printChildren(node, prefix)
+// Spotify operations
+func ensureSpotifySecret() {
+	if config.SpotifySecret != "" {
+		return
+	}
+
+	fmt.Print("Enter your Spotify client secret: ")
+	secretBytes, err := term.ReadPassword(int(syscall.Stdin))
+	failIfError("Failed to read Spotify secret", err)
+	config.SpotifySecret = string(secretBytes)
+	fmt.Println() // newline after password input
+}
+
+func mustAuthenticateSpotify() *spotify.Client {
+	log.Println("Opening browser to authenticate with Spotify...")
+
+	client, err := rdbs.SpotifyOAuthClient(config.SpotifyClientID, config.SpotifySecret)
+	failIfError("Spotify OAuth failed: %v", err)
+
+	return client
+}
+
+func mustGetCurrentSpotifyUser(client *spotify.Client) *spotify.PrivateUser {
+	user, err := client.CurrentUser()
+	failIfError("Failed to get current Spotify user", err)
+
+	log.Printf("Authenticated as: %s", user.DisplayName)
+	return user
+}
+
+func mustGetOrCreateSpotifyPlaylist(client *spotify.Client, userID string) spotify.ID {
+	ensureSpotifyPlaylistName()
+
+	playlists := mustGetUserPlaylists(client, userID)
+	matches := findMatchingPlaylists(playlists, config.SpotifyPlaylistName)
+
+	switch len(matches) {
+	case 0:
+		return createNewSpotifyPlaylist(client, userID)
+	case 1:
+		log.Printf("Using existing playlist: %s", matches[0].p.Name)
+		return matches[0].p.ID
+	default:
+		return selectFromMultipleSpotifyPlaylists(matches)
 	}
 }
 
-// printChildren prints all child nodes
-func printChildren(node *rekordbox.PlaylistNode, prefix string) {
-	var children []*rekordbox.PlaylistNode
-	children = append(children, node.Children...)
+func ensureSpotifyPlaylistName() {
+	if config.SpotifyPlaylistName != "" {
+		return
+	}
+
+	prompt := promptui.Prompt{
+		Label: "Enter name for Spotify playlist",
+	}
+	var err error
+	config.SpotifyPlaylistName, err = prompt.Run()
+	failIfError("Failed to get Spotify playlist name", err)
+}
+
+func mustGetUserPlaylists(client *spotify.Client, userID string) *spotify.SimplePlaylistPage {
+	playlists, err := client.GetPlaylistsForUser(userID)
+	failIfError("Failed to get user playlists", err)
+	return playlists
+}
+
+type playlistMatch struct {
+	index int
+	p     spotify.SimplePlaylist
+}
+
+func findMatchingPlaylists(playlists *spotify.SimplePlaylistPage, name string) []playlistMatch {
+	var matches []playlistMatch
+	for i, p := range playlists.Playlists {
+		if p.Name == name {
+			matches = append(matches, playlistMatch{index: i, p: p})
+		}
+	}
+	return matches
+}
+
+func createNewSpotifyPlaylist(client *spotify.Client, userID string) spotify.ID {
+	log.Printf("Creating new playlist: %s", config.SpotifyPlaylistName)
+
+	playlist, err := client.CreatePlaylistForUser(
+		userID,
+		config.SpotifyPlaylistName,
+		"Exported from Rekordbox",
+		false, // public
+	)
+	failIfError("Failed to create playlist", err)
+
+	return playlist.ID
+}
+
+func selectFromMultipleSpotifyPlaylists(matches []playlistMatch) spotify.ID {
+	formatted := make([]string, len(matches))
+	for i, match := range matches {
+		formatted[i] = fmt.Sprintf("%s (%d tracks)", match.p.Name, match.p.Tracks.Total)
+	}
+
+	prompt := promptui.Select{
+		Label:             "Multiple playlists found, select one",
+		Items:             formatted,
+		Stdout:            os.Stderr,
+		StartInSearchMode: true,
+	}
+
+	i, _, err := prompt.Run()
+	failIfError("Failed to select playlist", err)
+
+	return matches[i].p.ID
+}
+
+func syncTracksToSpotify(client *spotify.Client, playlistID spotify.ID, tracks []rdbs.Track) {
+	log.Printf("Searching for %d tracks on Spotify...", len(tracks))
+
+	spotifyTracks, err := rdbs.SpotifySearch(client, tracks)
+	failIfError("Failed to search tracks on Spotify", err)
+
+	log.Println("Adding tracks to playlist...")
+	addedCount := 0
+	for _, track := range spotifyTracks {
+		if track.ID == "" {
+			continue
+		}
+
+		_, err := client.AddTracksToPlaylist(playlistID, track.ID)
+		if err != nil {
+			log.Printf("Failed to add track '%s': %v", track.Name, err)
+		} else {
+			addedCount++
+		}
+	}
+
+	log.Printf("Successfully added %d tracks to playlist", addedCount)
+}
+
+// Display functions
+func printTrackList(tracks []rdbs.Track, playlistName string) {
+	fmt.Printf("\nTracks in %s:\n", playlistName)
+	fmt.Println(strings.Repeat("=", len(playlistName)+11))
+
+	for i, track := range tracks {
+		fmt.Printf("%3d. %s - %s\n", i+1, track.Artist, track.Title)
+	}
+
+	fmt.Printf("\nTotal: %d tracks\n", len(tracks))
+}
+
+func printDirectoryTree(hierarchy *rekordbox.PlaylistNode) {
+	fmt.Println("Rekordbox Playlist Directory Tree:")
+	fmt.Println(strings.Repeat("=", 35))
+	printDirectoryTreeRecursive(hierarchy, "", true)
+}
+
+func printDirectoryTreeRecursive(node *rekordbox.PlaylistNode, prefix string, isLast bool) {
+	if node.Playlist != nil {
+		connector := "├── "
+		if isLast {
+			connector = "└── "
+		}
+
+		fmt.Printf("%s%s%s\n", prefix, connector, node.Playlist.Name)
+
+		childPrefix := prefix + "│   "
+		if isLast {
+			childPrefix = prefix + "    "
+		}
+		printDirectoryChildren(node, childPrefix)
+	} else {
+		printDirectoryChildren(node, prefix)
+	}
+}
+
+func printDirectoryChildren(node *rekordbox.PlaylistNode, prefix string) {
+	children := make([]*rekordbox.PlaylistNode, len(node.Children))
+	copy(children, node.Children)
+
+	// Sort children alphabetically
 	sort.Slice(children, func(i, j int) bool {
 		return strings.Compare(children[i].Playlist.Name, children[j].Playlist.Name) < 0
 	})
+
 	for i, child := range children {
 		isLast := i == len(children)-1
-		printDirectoryTree(child, prefix, isLast)
+		printDirectoryTreeRecursive(child, prefix, isLast)
 	}
 }
 
-// collectPlaylistsWithTracks gathers all playlists with at least one track into a slice
-func collectPlaylistsWithTracks(node *rekordbox.PlaylistNode, playlists *[]*rekordbox.PlaylistNode, db *rekordbox.DB) {
-	if node.Playlist != nil {
-		tracks, err := db.GetPlaylistTracks(node.Playlist.ID)
-		if err != nil {
-			log.Printf("warning: could not get tracks for playlist %s: %v", node.Playlist.Name, err)
-			return
-		}
-		if len(tracks) > 0 {
-			*playlists = append(*playlists, node)
-		}
+// Utility functions
+func getTerminalHeight() int {
+	_, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		log.Printf("Warning: could not get terminal size, using default: %v", err)
+		return 10 // Fallback
 	}
-	for _, child := range node.Children {
-		collectPlaylistsWithTracks(child, playlists, db)
+	return height
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
 	}
+	return b
 }
 
 func failIfError(msg string, err error) {
